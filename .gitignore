@@ -1,6 +1,5 @@
 /Manifest*.toml
 /docs/Manifest*.toml
-/docs/build/
 test/*.csv
 docs/.DS_Store
 .DS_Store

@@ -14,7 +14,3 @@ res = tj_prod_est(data = data,
                   time = :year,
                   id = :ID,
                   options = Dict{Symbol, Any}())
-
-flexible_input = [:M]
-fixed_inputs = [:L, :K]
-a = vcat(flexible_input, fixed_inputs)
