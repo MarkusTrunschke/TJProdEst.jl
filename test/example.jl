@@ -2,7 +2,7 @@ using Pkg; Pkg.activate(pwd())
 using TJProdEst, DataFrames, CSV, Optim, JLD2
 
 # Read in data
-data = load("test/example_data.jld2", "data")
+data = load(joinpath("test","example_data.jld2"), "data")
 
 # Basic example
 res = tj_prod_est(data = data,
