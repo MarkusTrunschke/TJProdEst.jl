@@ -1,6 +1,6 @@
 # TJProdEst
 
-[![Build Status](https://github.com/q/TJProdEst.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/q/TJProdEst.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Build Status](https://github.com/MarkusTrunschke/TJProdEst.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/MarkusTrunschke/TJProdEst.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
 This package implements the production function estimation approach from [Trunschke and Judd (2024)](https://www.nber.org/papers/w33205), with a GMM estimator and bootstrap standard errors. Currently only one flexible input is supported. However, the package supports multiple fixed inputs and shifters in the law of motion of productivity.
 
