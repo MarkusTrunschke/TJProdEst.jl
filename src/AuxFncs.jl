@@ -235,7 +235,6 @@ function panel_lag!(;data::DataFrame, id::Symbol, time::Symbol, variable::Union{
     if any(in(Symbol.(names(data))), Symbol.(lag_prefix, variable))
         if force == true
             select!(data, Not(filter(in(Symbol.(names(data))), Symbol.(lag_prefix, variable))))
-            # df2 = df2[!, Not(Symbol.(lag_prefix, variable))]
         else
             throw("Specified name for lag of variable already present in specified dataframe. Either set force = true, choose difference lag variable name, or rename the column.")
         end
