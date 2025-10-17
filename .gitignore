@@ -3,3 +3,4 @@
 test/*.csv
 docs/.DS_Store
 .DS_Store
+*.jld2

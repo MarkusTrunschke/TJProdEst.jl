@@ -18,7 +18,11 @@ A struct to store the outcome of a computation or experiment.
 mutable struct Results
     point_estimates::NamedTuple
     std_errors::NamedTuple
+    variance::NamedTuple
+    p_values::NamedTuple
+    t_statistics::NamedTuple
     conf_intervals::NamedTuple
+    criterion_value::Float64
 end
 
 """
@@ -46,11 +50,15 @@ struct Setup
     all_inputs::Vector{Symbol}
     output_price::Symbol
     ω_lom_degree::Int
+    ω_shifter::Union{Symbol, Vector{Symbol}}
     time::Union{Symbol, Missing}
     id::Union{Symbol, Missing}
     prd_fnc_form::String
-    SE_estimation::Bool
-    options::Dict{Symbol, Any}
+    std_err_estimation::Bool
+    std_err_type::String
+    boot_reps::Int
+    maximum_boot_tries::Int
+    optimizer_options::NamedTuple
 end
 
 """
@@ -72,19 +80,26 @@ function res_struct_init(Setup::Setup)
             lom_sym_vec = hcat(lom_sym_vec, "ω"*string(superscript_this!(string(j))))
         end
     end
-    ω_lom_tpl = (;Pair.(Symbol.(lom_sym_vec), Ref{Union{Float64,Missing}}())...)
+    lom_sym_vec = vcat(lom_sym_vec, string.(Setup.ω_shifter)...)
+    ω_lom_tpl = (;Pair.(Symbol.(lom_sym_vec), missing)...)
 
     prd_fnc_tpl = if Setup.prd_fnc_form == "CobbDouglas"
-        (; Pair.(Setup.all_inputs, Ref{Union{Float64,Missing}}())...)
+        (; Pair.(vcat(:constant, Setup.all_inputs), missing)...)
     else
         error("Unsupported production function form: "*Setup.prd_fnc_form)
     end
 
     # Setup conf intervals tuple
-    prd_fnc_tpl = (; Pair.(Setup.all_inputs, [Vector{Union{Float64,Missing}}(undef,2) for _ in 1:length(Setup.all_inputs)])...)
-    ω_lom_tpl = (; Pair.(Symbol.(lom_sym_vec), [Vector{Union{Float64,Missing}}(undef,2) for _ in 1:length(lom_sym_vec)])...)
+    prd_fnc_ci_tpl = (; Pair.(vcat(:constant, Setup.all_inputs), [Vector{Union{Float64,Missing}}(undef,2) for _ in 1:length(Setup.all_inputs)+1])...)
+    ω_lom_ci_tpl = (; Pair.(Symbol.(lom_sym_vec), [Vector{Union{Float64,Missing}}(undef,2) for _ in 1:length(lom_sym_vec)])...)
 
-    return Results((prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl), (prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl), (prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl))
+    return Results((prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl), # Point estimates
+                   (prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl), # Standard errors
+                   (prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl), # Variance
+                   (prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl), # P-values
+                   (prd_fnc = prd_fnc_tpl, ω_lom = ω_lom_tpl), # T-statistics
+                   (prd_fnc = prd_fnc_ci_tpl, ω_lom = ω_lom_ci_tpl), # Confidence intervals
+                   Inf) # Criterion value
 end
 
 """
@@ -123,24 +138,45 @@ function setup_struct_init(output::Symbol,
                            flexible_input_price::Symbol,
                            output_price::Symbol,
                            ω_lom_degree::Int,
+                           ω_shifter::Union{Symbol, Vector{Symbol}},
                            time::Union{Symbol, Missing},
                            id::Union{Symbol, Missing},
                            prd_fnc_form::String,
                            std_err_estimation::Bool,
-                           options::Dict{Symbol, Any})
+                           std_err_type::String,
+                           boot_reps::Int,
+                           maximum_boot_tries::Int,
+                           optimizer_options::NamedTuple)
+
+    # Default optimizer options
+    default_opts = (
+        lower_bound = fill(-Inf, length(fixed_inputs) + 2),
+        upper_bound = fill(Inf, length(fixed_inputs) + 2),
+        startvals = zeros(length(fixed_inputs) + 2) .+ 0.5,
+        optimizer = Optim.NelderMead(),
+        optim_options = Optim.Options()
+    )
+
+    # Merge user-provided options with defaults
+    merged_opts = merge(default_opts, optimizer_options)
+    
     return Setup(
         output,
         flexible_input,
         fixed_inputs,
         flexible_input_price,
-        vcat(flexible_input, fixed_inputs),
+        vcat(fixed_inputs, flexible_input),
         output_price,
         ω_lom_degree,
+        ω_shifter,
         time,
         id,
         prd_fnc_form,
         std_err_estimation,
-        options
+        std_err_type,
+        boot_reps,
+        maximum_boot_tries,
+        merged_opts
     )
 end
 
@@ -148,10 +184,13 @@ end
 function jt_data_prep(data::DataFrame, Setup::Setup)
     
     # Select necessary variables from data frame
-    est_data = copy(data[:, [Setup.time, Setup.id, Setup.output, Setup.flexible_input, Setup.fixed_inputs..., Setup.flexible_input_price, Setup.output_price]])
+    est_data = copy(data[:, [Setup.time, Setup.id, Setup.output, Setup.flexible_input, Setup.fixed_inputs..., Setup.flexible_input_price, Setup.output_price, Setup.ω_shifter...]])
+
+    # Calculate share (use the first flexible input if a vector is provided)
+    est_data.ln_proxy_output_frac = log.((est_data[!, Setup.flexible_input] .* est_data[!, Setup.flexible_input_price]) ./ (est_data[!, Setup.output] .* est_data[!, Setup.output_price]))
 
     # Build variable list correctly (vcat returns a Vector{Symbol})
-    vars_to_lag::Vector{Symbol} = vcat(Setup.output, Setup.fixed_inputs..., Setup.flexible_input, Setup.output_price, Setup.flexible_input_price)
+    vars_to_lag::Vector{Symbol} = vcat(Setup.output, Setup.fixed_inputs..., Setup.flexible_input, Setup.output_price, Setup.flexible_input_price, :ln_proxy_output_frac)
     
     panel_lag!(data = est_data, id = Setup.id, time = Setup.time, variable = vars_to_lag, force = true)
 
@@ -162,13 +201,9 @@ function jt_data_prep(data::DataFrame, Setup::Setup)
     if :constant ∉ names(est_data)
         est_data.constant = ones(nrow(est_data))
     end
-
-    # Calculate share (use the first flexible input if a vector is provided)
-    flex_sym = Setup.flexible_input isa Vector ? Setup.flexible_input[1] : Setup.flexible_input
-    est_data.ln_proxy_output_frac = log.((est_data[!, flex_sym] .* est_data[!, Setup.output_price]) ./ (est_data[!, Setup.output] .* est_data[!, Setup.output_price]))
     
     # Drop missings
-    dropmissing!(est_data, [[Setup.time, Setup.id, Setup.output, Setup.flexible_input, Setup.fixed_inputs..., Setup.flexible_input_price, Setup.output_price]..., lagvars...])
+    dropmissing!(est_data, [[Setup.time, Setup.id, Setup.output, Setup.flexible_input, Setup.fixed_inputs..., Setup.flexible_input_price, Setup.output_price]..., Setup.ω_shifter..., lagvars...])
 
     # Return the data
     return est_data
@@ -300,6 +335,212 @@ function lagging_that_panel!(;data::DataFrame, id::Symbol, time::Symbol, variabl
 
     # Return result
     return data
+end
+
+"""
+    polynomial_fnc_fast!(poly_mat, degree; par_cal=false) -> poly_mat
+
+In-place computation of polynomial terms from a base variable. This function
+mutates `poly_mat` by filling its columns with successive powers of the first
+column: the i-th column is set to (first column)^i.
+
+This is a performance-optimized version designed for repeated evaluations where
+the matrix has already been preallocated. It avoids dynamic allocations at
+runtime by mutating the input matrix directly (hence the trailing `!`).
+
+# Arguments
+- `poly_mat::Union{Array{<:Number}, SubArray{<:Number}}`: A matrix where the
+  first column contains the base values and columns 2 through `degree` will be
+  filled with polynomial terms. Must have at least `degree` columns.
+- `degree::Int`: The highest polynomial degree to compute. For example, if
+  `degree=3`, columns 2 and 3 will contain the squared and cubed values of
+  column 1, respectively.
+
+# Keyword Arguments
+- `par_cal::Bool=false`: If `true`, uses parallel computation via `Threads.@threads`
+  to compute polynomial columns concurrently.
+
+# Returns
+- Returns the mutated `poly_mat` with polynomial columns filled in-place.
+
+# Notes
+- The function assumes `poly_mat` has been preallocated with sufficient columns
+  (at least `degree` columns). No bounds checking is performed.
+- Column 1 is never modified; it serves as the base for all polynomial terms.
+- Columns 2 through `degree` are overwritten with powers 2 through `degree`.
+- For small datasets or low degrees, `par_cal=false` (sequential) is typically
+  faster due to threading overhead.
+
+# Example
+```julia
+# Preallocate a matrix with 3 columns for base values and polynomials up to degree 3
+poly_mat = zeros(100, 3)
+poly_mat[:, 1] .= rand(100)  # Fill first column with base values
+
+# Compute polynomial terms in-place
+polynomial_fnc_fast!(poly_mat, 3)
+# Now poly_mat[:, 2] contains squared values, poly_mat[:, 3] contains cubed values
+```
+"""
+function polynomial_fnc_fast!(poly_mat::Union{Array{<:Number}, SubArray{<:Number}}, degree::Int; par_cal::Bool = false)
+    # Compute polynomial columns (each column of the matrix represents the i's polynomial of the first column)
+    if par_cal == false
+        for i in 2:degree
+            poly_mat[:,i] .= @view(poly_mat[:,1]) .^ i
+        end
+    else
+        Threads.@threads for i in 2:degree
+            poly_mat[:,i] .= @view(poly_mat[:,1]) .^ i
+        end
+    end
+
+    return poly_mat 
+end
+
+"""
+    fastOLS(; Y, X, multicolcheck=true, force=false) -> Vector{Float64}
+
+Compute Ordinary Least Squares (OLS) regression coefficients using optimized
+linear algebra operations. This function minimizes memory allocations and uses
+efficient in-place operations for computing β̂ = (X'X)⁻¹X'Y.
+
+The implementation uses Cholesky decomposition for solving the normal equations,
+which is faster than direct matrix inversion but may be less stable for
+ill-conditioned design matrices.
+
+# Keyword Arguments
+- `Y::Union{Matrix, Vector}`: The dependent variable(s). Can be a vector for
+  single-response regression or a matrix for multiple responses.
+- `X::Union{Matrix{<:Number}, Vector{<:Number}}`: The design matrix of regressors
+  (independent variables). Each column represents a regressor, each row an
+  observation. Can also be a vector for single-regressor case.
+- `multicolcheck::Bool=true`: If `true`, checks for perfect multicollinearity
+  in the regressors by comparing `rank(X)` to the number of columns. This helps
+  detect singular design matrices before attempting to solve the system.
+- `force::Bool=false`: If `true` and multicollinearity is detected, automatically
+  drops the first offending column and prints a warning. If `false`, throws an
+  error when multicollinearity is detected. Only relevant when `multicolcheck=true`.
+
+# Returns
+- `Vector{Float64}`: A vector of estimated regression coefficients with length
+  equal to the number of columns in `X` (or 1 if `X` is a vector). If `force=true`
+  and a column was dropped due to multicollinearity, the length reflects the
+  reduced design matrix.
+
+# Throws
+- Throws an error with message "ERROR: Regressors are perfectly multicolliniar"
+  if `multicolcheck=true`, `force=false`, and `rank(X) < ncol(X)`.
+
+# Performance Notes
+- Uses in-place operations (`mul!`, `ldiv!`, `cholesky!`) to minimize allocations.
+- Preallocates `cache` matrix for X'X and `coefs` vector for results.
+- Cholesky decomposition via `ldiv!(cholesky!(Hermitian(cache)), coefs)` is the
+  fastest approach for well-conditioned matrices (see Julia discourse #103111).
+- For ill-conditioned or numerically unstable problems, consider alternative
+  solvers (e.g., QR decomposition or regularized regression).
+
+# Example
+```julia
+# Simple linear regression
+X = [ones(100) randn(100)]  # Intercept + one regressor
+Y = 2.0 .+ 3.0 .* X[:, 2] .+ 0.1 .* randn(100)
+β = fastOLS(Y=Y, X=X)
+# β ≈ [2.0, 3.0]
+
+# Multiple regression with multicollinearity check
+X_bad = [ones(50) randn(50) ones(50)]  # First and third columns identical
+Y = randn(50)
+β = fastOLS(Y=Y, X=X_bad, force=true)  # Drops one column, prints warning
+```
+"""
+function fastOLS(; Y::Union{Matrix, Vector}, X::Union{Matrix{<:Number}, Vector{<:Number}}, multicolcheck::Bool = true, force::Bool = false) # Y::Vector{<:Number}, X::Matrix{<:Number}
+
+    X_len::Int = 1
+    if typeof(X) <: Matrix
+        X_len = size(X)[2]
+    end
+
+    # Check for perfect multicoliniarity in regressors
+    if multicolcheck == true && rank(X) != X_len
+        if force == false
+            throw("ERROR: Regressors are perfectly multicolliniar")
+        else
+            for j = eachindex(eachcol(X))
+                if rank(X[:,Not(j)]) == X_len - 1
+                    X = copy(X)
+                    X = X[:,Not(j)]
+
+                    X_len = size(X)[2]
+
+                    println("Dropped regressor "*string(j)*" because of multicolliniarity!")
+                    break
+                end
+            end
+        end
+    end
+
+    coefs = Array{Float64}(undef, X_len, 1)
+    cache = Array{Float64}(undef, X_len, X_len)
+    
+    # OLS
+    mul!(cache, X', X) # X'X
+    mul!(coefs, X', Y) # X'*Y
+    ldiv!(cholesky!(Hermitian(cache)), coefs) # inv(X'*X)*X*y, see https://discourse.julialang.org/t/memory-allocation-left-division-operator/103111/3 for an explination why this is the fastest way (even though not optimal for ill-conditioned matrices)
+    
+    return coefs
+end
+
+## Function drawing a sample of firms
+function draw_sample(data::DataFrame, id::Symbol)
+
+    id_list = unique(data[!, id])
+    
+    ## Randomly chose observation
+    # Generate vector with sample of IDs
+    boot_choose = DataFrame(id => sample(id_list, length(id_list); replace=true))
+
+    # Add unique identifier
+    boot_choose.unique_id = range(1,length = length(boot_choose[!, id]))
+
+    # Select obs in dataset that match the drawn numbers
+    sample_data = innerjoin(data, boot_choose, on = id)
+
+    return sample_data
+end
+
+function tj_print_res_bigestimator(data::DataFrame, Results::Results, Setup::Setup)
+    
+    # Production function parameters
+    prd_fnc_array = hcat(
+        string.(collect(keys(Results.point_estimates.prd_fnc))),
+        collect(values(Results.point_estimates.prd_fnc)),
+        collect(values(Results.std_errors.prd_fnc)),
+        collect(values(Results.t_statistics.prd_fnc)),
+        collect(values(Results.p_values.prd_fnc)),
+        [ci[1] for ci in collect(values(Results.conf_intervals.prd_fnc))],  # CI lower
+        [ci[2] for ci in collect(values(Results.conf_intervals.prd_fnc))]   # CI upper
+    )
+
+    # ω law-of-motion parameters
+    lom_array = hcat(
+        string.(collect(keys(Results.point_estimates.ω_lom))),
+        collect(values(Results.point_estimates.ω_lom)),
+        collect(values(Results.std_errors.ω_lom)),
+        collect(values(Results.t_statistics.ω_lom)),
+        collect(values(Results.p_values.ω_lom)),
+        [ci[1] for ci in collect(values(Results.conf_intervals.ω_lom))],    # CI lower
+        [ci[2] for ci in collect(values(Results.conf_intervals.ω_lom))]     # CI upper
+    )
+
+    headers = ["Estimate", "Std. Error", "t-statistic", "p-value", "CI Lower", "CI Upper"]
+    println("")
+    println("Observations: "*string(nrow(data)))
+    println("Firms: "*string(length(unique(data[!, Setup.id]))))
+    println("Bootstrap iterations: "*string(Setup.boot_reps))
+    println("Final GMM criterion value: "*string(round(Results.criterion_value, digits=6)))
+    pretty_table(vcat(prd_fnc_array, lom_array)[:,begin+1:end], column_labels = headers, formatters =  [fmt__printf("%5.5f")], row_labels = vcat(prd_fnc_array, lom_array)[:,1],
+                 row_group_labels = [1 => "Production function parameters", 5 => "Ω law of motion parameters"], stubhead_label = "Variable",
+                 row_group_label_alignment = :c, limit_printing = false)
 end
 
 # Define a dictionary for superscript characters
