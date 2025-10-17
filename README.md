@@ -2,7 +2,9 @@
 
 [![Build Status](https://github.com/q/TJProdEst.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/q/TJProdEst.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
-This package implements the production function estimation approach from Trunschke and Judd (2024), in a GMM estimator and bootstrap standard errors.
+This package implements the production function estimation approach from [Trunschke and Judd (2024)](https://www.nber.org/papers/w33205), with a GMM estimator and bootstrap standard errors. Currently only one flexible input is supported. However, the package supports multiple fixed inputs and shifters in the law of motion of productivity.
+
+Note that this is work in progress. Use at your own risk. Please report any issues to the author.
 
 ## Installation
 
@@ -22,9 +24,9 @@ The main estimation function is `tj_prod_est`, which estimates production functi
 All arguments are keyword arguments. The required arguments are:
 
 - `data` is a DataFrame containing all variables referenced by other arguments
-- `output` is a Symbol representing the firm's natural logarithm of output
-- `flexible_input` is a Symbol representing the natural logarithm of the flexible input (e.g., materials)
-- `fixed_inputs` is a Symbol or Vector of Symbols representing natural logarithm(s) of fixed production inputs (e.g., capital, labor)
+- `output` is a Symbol representing the measure for firm's output
+- `flexible_input` is a Symbol representing the measure for one flexible input (e.g., materials)
+- `fixed_inputs` is a Symbol or Vector of Symbols representing of fixed production inputs (e.g., capital, labor)
 - `flexible_input_price` is a Symbol for the flexible input price variable
 - `output_price` is a Symbol for the output price variable
 - `id` is a Symbol identifying each firm's unique identifier
@@ -32,15 +34,14 @@ All arguments are keyword arguments. The required arguments are:
 
 ### Optional Arguments
 
-- `ω_lom_degree` is the polynomial degree for the productivity (ω) law of motion. Default is `1`
-- `ω_shifter` is a Symbol or Vector of Symbols for additional variables that shift productivity over time. Default is an empty vector
-- `std_err_estimation` is a Boolean indicating whether to compute standard errors. Default is `true`
-- `std_err_type` is the standard error estimation method. Currently only `"Bootstrap"` is supported. Default is `"Bootstrap"`
+- `ω_lom_degree` is the polynomial degree for the productivity (ω) law of motion. Default is `1`.
+- `ω_shifter` is a Symbol or Vector of Symbols for additional variables that shift productivity over time. Default is an empty vector.
+- `std_err_estimation` is a Boolean indicating whether to compute standard errors. Default is `true`. It is intended to allow skipping the lengthly bootstrap estimation part if one wants to test specifications.
 - `boot_reps` is an integer indicating the number of bootstrap replications for standard error estimation. Default is `200`
 - `maximum_boot_tries` is the maximum number of retry attempts for failed bootstrap iterations. Default is `10`
 - `optimizer_options` is a NamedTuple containing optimization settings:
-  - `lower_bound` is a vector of lower bounds for parameters. Default is `-Inf` for all parameters
-  - `upper_bound` is a vector of upper bounds for parameters. Default is `Inf` for all parameters
+  - `lower_bound` is a vector of lower bounds for parameters. Default is `-Inf` for all parameters. They do not have any effect if the optimizer is not of a `FminBox()` type.
+  - `upper_bound` is a vector of upper bounds for parameters. Default is `Inf` for all parameters. They do not have any effect if the optimizer is not of a `FminBox()` type.
   - `startvals` is a vector of starting values for the optimization. Default is `0.5` for all parameters
   - `optimizer` specifies the optimization algorithm from [Optim.jl](https://julianlsolvers.github.io/Optim.jl/stable/). Default is `Optim.NelderMead()`
   - `optim_options` is an `Optim.Options()` object for configuring the optimizer. See [Optim.Options](https://julianlsolvers.github.io/Optim.jl/stable/user/config/) for available options
@@ -49,15 +50,15 @@ All arguments are keyword arguments. The required arguments are:
 
 The function returns a NamedTuple `(Results, Setup)` where:
 - `Results` is a mutable struct containing:
-  - `point_estimates::NamedTuple`: Nested NamedTuple with `(prd_fnc, ω_lom)` containing parameter estimates
+  - `point_estimates::NamedTuple`: Nested NamedTuple with `(prd_fnc, ω_lom)` containing parameter estimates for the production function and the law of motion.
   - `std_errors::NamedTuple`: Standard errors for all parameters
   - `variance::NamedTuple`: Variance estimates
-  - `p_values::NamedTuple`: p-values for hypothesis tests
-  - `t_statistics::NamedTuple`: t-statistics
-  - `conf_intervals::NamedTuple`: 95% confidence intervals
-  - `criterion_value::Float64`: Final GMM criterion value
+  - `p_values::NamedTuple`: p-values for the t-test of the parameter being different from zero. 
+  - `t_statistics::NamedTuple`: t-statistics for the t-test of the parameter being different from zero. 
+  - `conf_intervals::NamedTuple`: Lower and upper bound of 95% confidence intervals
+  - `criterion_value::Float64`: Final GMM criterion value at the point estimates.
 
-- `Setup` is a struct containing the configuration used for estimation
+- `Setup` is a struct containing the configuration used for estimation.
 
 ## Example
 
@@ -68,7 +69,7 @@ This example estimates a Cobb-Douglas production function with one flexible inpu
 using TJProdEst, DataFrames, CSV
 
 # Read in your panel data
-# Assumes data has columns: ID, year, Y, M, K, L, Pᴹ, Pʸ (all in logs except ID and year)
+# Assumes data has columns: ID, year, Y, M, K, L, Pᴹ, Pʸ
 data = CSV.read("path/to/your/data.csv", DataFrame)
 
 # Run estimation with default options
@@ -82,7 +83,32 @@ results, setup = tj_prod_est(
     time = :year,
     id = :ID
 )
+```
+Output looks like this (with your own results)
+```julia
+Progress: 100%[==================================================] Time: 0:00:03
 
+Observations: 1900
+Firms: 100
+Bootstrap iterations: 200
+Final GMM criterion value: 0.0
+┌──────────┬──────────┬────────────┬─────────────┬─────────┬──────────┬──────────┐
+│ Variable │ Estimate │ Std. Error │ t-statistic │ p-value │ CI Lower │ CI Upper │
+├──────────┴──────────┴────────────┴─────────────┴─────────┴──────────┴──────────┤
+│                         Production function parameters                         │
+├──────────┬──────────┬────────────┬─────────────┬─────────┬──────────┬──────────┤
+│ constant │  0.80490 │    0.06153 │    13.08067 │ 0.00000 │  0.68430 │  0.92551 │
+│        K │  0.20201 │    0.02329 │     8.67471 │ 0.00000 │  0.15637 │  0.24765 │
+│        L │  0.30615 │    0.01373 │    22.28972 │ 0.00000 │  0.27923 │  0.33307 │
+│        M │  0.49980 │    0.00114 │   437.75606 │ 0.00000 │  0.49757 │  0.50204 │
+├──────────┴──────────┴────────────┴─────────────┴─────────┴──────────┴──────────┤
+│                           Ω law of motion parameters                           │
+├──────────┬──────────┬────────────┬─────────────┬─────────┬──────────┬──────────┤
+│        ω │  0.70824 │    0.03347 │    21.15993 │ 0.00000 │  0.64264 │  0.77384 │
+└──────────┴──────────┴────────────┴─────────────┴─────────┴──────────┴──────────┘
+```
+### Accessing results
+```
 # Access production function parameters
 results.point_estimates.prd_fnc
 # Output: (constant = 0.123, K = 0.456, L = 0.321, M = 0.234)
@@ -134,8 +160,12 @@ results, setup = tj_prod_est(
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
+## Author
+
+* **Markus Trunschke:** mtrunsch@stanford.edu
+
 ## License
 
-Please cite this package if you use it for published research.
+Please cite this package and the [paper the estimator is based on](https://www.nber.org/papers/w33205) if you use it for published research.
 
 [MIT](https://choosealicense.com/licenses/mit/)

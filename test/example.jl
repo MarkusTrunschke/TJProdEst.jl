@@ -12,6 +12,7 @@ res = tj_prod_est(data = data,
                   flexible_input_price = :Pᴹ,
                   output_price = :Pʸ,
                   time = :year,
+                  boot_reps = 10,
                   id = :ID);
 
 # Example with more options

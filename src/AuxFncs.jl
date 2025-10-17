@@ -433,7 +433,7 @@ function tj_print_res_bigestimator(data::DataFrame, Results::Results, Setup::Set
     println("Bootstrap iterations: "*string(Setup.boot_reps))
     println("Final GMM criterion value: "*string(round(Results.criterion_value, digits=6)))
     pretty_table(vcat(prd_fnc_array, lom_array)[:,begin+1:end], column_labels = headers, formatters =  [fmt__printf("%5.5f")], row_labels = vcat(prd_fnc_array, lom_array)[:,1],
-                 row_group_labels = [1 => "Production function parameters", 5 => "Ω law of motion parameters"], stubhead_label = "Variable",
+                 row_group_labels = [1 => "Production function parameters", size(prd_fnc_array,1)+1 => "Ω law of motion parameters"], stubhead_label = "Variable",
                  row_group_label_alignment = :c, limit_printing = false)
 end
 
