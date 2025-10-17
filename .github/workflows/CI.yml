@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - '1.11'
-          - '1.6'
-          - 'pre'
+          - '1.10'  # Minimum version from Project.toml
+          - '1'     # Latest stable release (currently 1.11.x)
+          - 'pre'   # Pre-release version
         os:
           - ubuntu-latest
           - macOS-latest
