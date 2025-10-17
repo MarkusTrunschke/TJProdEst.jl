@@ -4,3 +4,4 @@ test/*.csv
 docs/.DS_Store
 .DS_Store
 *.jld2
+!test/example_data.jld2
