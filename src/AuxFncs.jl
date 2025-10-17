@@ -8,12 +8,16 @@ constructor function `res_struct_init()` that returns a default instance.
 """
     Results
 
-A struct to store the outcome of a computation or experiment. 
+Mutable struct storing estimation results with nested NamedTuples for production function and ω law-of-motion parameters.
 
 # Fields
-- `point_estimates::NamedTuple`: A tuple containing the point estimates of the model.
-- `std_errors::NamedTuple`: A tuple containing the standard errors of the model.
-- `conf_intervals::NamedTuple`: A tuple containing the confidence intervals of the model.
+- `point_estimates::NamedTuple`: Point estimates with `(prd_fnc, ω_lom)` structure
+- `std_errors::NamedTuple`: Standard errors 
+- `variance::NamedTuple`: Variance estimates
+- `p_values::NamedTuple`: p-values for hypothesis tests
+- `t_statistics::NamedTuple`: t-statistics
+- `conf_intervals::NamedTuple`: Confidence intervals (2-element vectors)
+- `criterion_value::Float64`: Final GMM criterion value
 """
 mutable struct Results
     point_estimates::NamedTuple
@@ -28,19 +32,25 @@ end
 """
     Setup
 
-A struct to hold the setup/configuration for the estimation procedure.
+Immutable struct storing estimation configuration and data settings.
 
 # Fields
-- `data::DataFrame`: The input data for the estimation.
-- `output::Symbol`: The output (dependent) variable.
-- `flexible_input::Vector{Symbol}`: A vector of flexible input variable symbols.
-- `fixed_inputs::Vector{Symbol}`: A vector of fixed input variable symbols.
-- `flexible_input_price::Symbol`: The price variable for the flexible input.
-- `output_price::Symbol`: The price variable for the output.
-- `ω_lom_degree::Int`: The degree for the ω_lom polynomial.
-- `time_var::Union{Symbol, Missing}`: The time variable, if applicable.
-- `firm_id::Union{Symbol, Missing}`: The firm identifier variable, if applicable.
-- `options::Dict{Symbol, Any}`: A dictionary of additional options for the estimation.
+- `output::Symbol`: Output variable column name
+- `flexible_input::Symbol`: Flexible input variable (e.g., materials)
+- `fixed_inputs::Union{Symbol,Vector{Symbol}}`: Fixed input(s) (e.g., capital, labor)
+- `flexible_input_price::Symbol`: Price for flexible input
+- `all_inputs::Vector{Symbol}`: Concatenation of `fixed_inputs` and `flexible_input`
+- `output_price::Symbol`: Output price variable
+- `ω_lom_degree::Int`: Polynomial degree for ω law-of-motion
+- `ω_shifter::Union{Symbol, Vector{Symbol}}`: Additional shifters in ω LOM
+- `time::Union{Symbol, Missing}`: Time variable for panel data
+- `id::Union{Symbol, Missing}`: Firm/panel identifier
+- `prd_fnc_form::String`: Production function form (e.g., "CobbDouglas")
+- `std_err_estimation::Bool`: Whether to compute standard errors
+- `std_err_type::String`: Standard error method (e.g., "Bootstrap")
+- `boot_reps::Int`: Number of bootstrap replications
+- `maximum_boot_tries::Int`: Maximum retry attempts for bootstrap
+- `optimizer_options::NamedTuple`: Optimization settings (bounds, startvals, optimizer, optim_options)
 """
 struct Setup
     output::Symbol
@@ -64,13 +74,7 @@ end
 """
     res_struct_init(Setup::Setup) -> Results
 
-Initializes and returns a new `Results` object with the specified fields.
-
-# Arguments
-- `Setup::Setup`: The setup struct containing all necessary parameters.
-
-# Returns
-- `Results`: A newly created result structure initialized with the given fields.
+Initialize a `Results` struct with `missing` values based on `Setup` configuration. Creates nested NamedTuples for production function (constant + all_inputs) and ω law-of-motion (ω terms + shifters) parameters.
 """
 function res_struct_init(Setup::Setup)
     # Setup point estimates tuple
@@ -106,10 +110,8 @@ end
     setup_struct_init(data, output, flexible_input, fixed_inputs, flexible_input_price,
                       output_price, ω_lom_degree, time, id, prd_fnc_form, options) -> Setup
 
-Construct a `Setup` object that consolidates all inputs and options required
-by the estimator. This helper normalizes input lists (it builds `all_inputs`
-by concatenating `flexible_input` and `fixed_inputs`) and packages arguments
-into the `Setup` struct used by the rest of the codebase.
+Construct a `Setup` struct with all estimation configuration. Merges user-provided `optimizer_options` 
+    with defaults and builds `all_inputs` by concatenating `fixed_inputs` and `flexible_input`.
 
 # Arguments
 - `data::DataFrame`: the input dataset.
@@ -126,11 +128,6 @@ into the `Setup` struct used by the rest of the codebase.
 
 # Returns
 - `Setup`: a filled `Setup` struct ready to be used by the estimation routine.
-
-# Example
-```julia
-setup = setup_struct_init(df, :Y, [:M], [:K,:L], :Pᴹ, :Pʸ, 1, :year, :ID, "CobbDouglas", Dict())
-```
 """
 function setup_struct_init(output::Symbol,
                            flexible_input::Symbol,
@@ -180,7 +177,11 @@ function setup_struct_init(output::Symbol,
     )
 end
 
-## Basic data preparation function
+"""
+    jt_data_prep(data::DataFrame, Setup::Setup) -> DataFrame
+
+Prepare panel data for estimation by computing proxy variable (log flexible input share) and creating lagged variables. Returns filtered dataset with complete observations.
+"""
 function jt_data_prep(data::DataFrame, Setup::Setup)
     
     # Select necessary variables from data frame
@@ -210,38 +211,19 @@ function jt_data_prep(data::DataFrame, Setup::Setup)
 end
 
 """
-        panel_lag!(; data, id, time, variable; lag_prefix="lag_", lags=1, drop_missings=false, force=false)
+    panel_lag!(; data, id, time, variable, lag_prefix="lag_", lags=1, drop_missings=false, force=false) -> DataFrame
 
-In-place panel lagging helper. For each `id` (panel unit) this function
-computes lagged versions of the specified `variable` columns (by default a
-single lag) and adds them to `data` using names prefixed by `lag_prefix`.
+Compute panel lags in-place using `ShiftedArrays.lag` within groups. Sorts by `id` and `time`, creates lag columns with specified prefix, and validates time gaps.
 
-This function mutates `data` (hence the trailing `!`). If you prefer a
-non-mutating variant use `panel_lag` (not provided here) or pass a copy of
-the data to `panel_lag!`.
-
-# Keyword arguments
-- `data::DataFrame`: the data frame to mutate (must contain `id` and `time`).
-- `id::Symbol`: panel identifier column.
-- `time::Symbol`: time ordering column.
-- `variable::Union{Vector{Symbol},Symbol}`: column or columns to lag.
-- `lag_prefix::String="lag_"`: prefix for created lag column names.
-- `lags::Int=1`: the lag distance (currently only single-lag is implemented in naming and checks).
-- `drop_missings::Bool=false`: if true, drop rows with missing lagged values.
-- `force::Bool=false`: if true, existing columns with the target lag names are removed; otherwise an error is thrown.
-
-# Notes
-- The function sorts `data` by `id` and `time` before lagging and uses
-    `ShiftedArrays.lag` applied within `groupby(data, id)`.
-- The newly created lag columns are named by concatenating the prefix and the
-    variable name (for example `lag_prefix * string(var)` produces `"lag_K"`).
-    They are inserted into `data` (mutating it). If inner lagged containers
-    are mutable and shared elsewhere, changes will be visible across those
-    references; this function creates independent lag columns via the
-    lagging/joining process.
-
-# Returns
-- Returns the mutated `data` (also modified in-place).
+# Keyword Arguments
+- `data::DataFrame`: Data frame to mutate
+- `id::Symbol`: Panel identifier column
+- `time::Symbol`: Time variable for ordering
+- `variable::Union{Vector{Symbol},Symbol}`: Column(s) to lag
+- `lag_prefix::String="lag_"`: Prefix for lag column names
+- `lags::Int=1`: Lag distance
+- `drop_missings::Bool=false`: Drop rows with missing lags
+- `force::Bool=false`: Remove existing lag columns if present
 """
 function panel_lag!(;data::DataFrame, id::Symbol, time::Symbol, variable::Union{Vector{Symbol},Symbol}, lag_prefix::String = "lag_", lags::Int = 1, drop_missings::Bool = false, force::Bool = false)
     
@@ -270,31 +252,9 @@ end
 
 
 """
-        lagging_that_panel!(; data, id, time, variable; lag_prefix="lag_", lags=1, drop_missings=false)
+    lagging_that_panel!(; data, id, time, variable, lag_prefix="lag_", lags=1, drop_missings=false) -> DataFrame
 
-Internal helper that performs the low-level lagging logic used by
-`panel_lag!`. This routine:
-
-- selects `id`, `time` and the target `variable` columns
-- computes lagged versions for each variable (and for `time`) using
-    `ShiftedArrays.lag` within groups defined by `id`
-- filters rows where the observed time difference is not equal to the
-    requested `lags` (sets those lag-values to `missing`)
-- joins the lagged columns back onto the original `data` and renames them
-    using the provided `lag_prefix`.
-
-# Keyword arguments
-- `data::DataFrame`: the full data frame to update (it is joined to lagged values).
-- `id::Symbol`: panel identifier column.
-- `time::Symbol`: time ordering column.
-- `variable::Union{Symbol,Vector{Symbol}}`: variable(s) to lag.
-- `lag_prefix::String`: prefix for the new lag columns.
-- `lags::Int`: expected lag distance (used to validate time gaps).
-- `drop_missings::Bool`: if true, drop rows with missing lagged values after the join.
-
-# Returns
-- The mutated `data` with additional lag columns; the function mutates
-    in-place and also returns the modified `data`.
+Internal helper for `panel_lag!`. Computes lags using `ShiftedArrays.lag` within groups, validates time gaps (sets to `missing` if gap ≠ `lags`), joins back to data, and renames columns.
 """
 function lagging_that_panel!(;data::DataFrame, id::Symbol, time::Symbol, variable::Union{Symbol,Vector{Symbol}}, lag_prefix::String = "lag_", lags::Int = 1, drop_missings::Bool = false)
 
@@ -340,47 +300,14 @@ end
 """
     polynomial_fnc_fast!(poly_mat, degree; par_cal=false) -> poly_mat
 
-In-place computation of polynomial terms from a base variable. This function
-mutates `poly_mat` by filling its columns with successive powers of the first
-column: the i-th column is set to (first column)^i.
-
-This is a performance-optimized version designed for repeated evaluations where
-the matrix has already been preallocated. It avoids dynamic allocations at
-runtime by mutating the input matrix directly (hence the trailing `!`).
+In-place computation of polynomial terms. Fills columns 2 through `degree` of `poly_mat` with powers 2 through `degree` of column 1. Preallocated matrix avoids allocations during repeated calls.
 
 # Arguments
-- `poly_mat::Union{Array{<:Number}, SubArray{<:Number}}`: A matrix where the
-  first column contains the base values and columns 2 through `degree` will be
-  filled with polynomial terms. Must have at least `degree` columns.
-- `degree::Int`: The highest polynomial degree to compute. For example, if
-  `degree=3`, columns 2 and 3 will contain the squared and cubed values of
-  column 1, respectively.
+- `poly_mat::Union{Array{<:Number}, SubArray{<:Number}}`: Matrix with base values in column 1
+- `degree::Int`: Highest polynomial degree to compute
 
 # Keyword Arguments
-- `par_cal::Bool=false`: If `true`, uses parallel computation via `Threads.@threads`
-  to compute polynomial columns concurrently.
-
-# Returns
-- Returns the mutated `poly_mat` with polynomial columns filled in-place.
-
-# Notes
-- The function assumes `poly_mat` has been preallocated with sufficient columns
-  (at least `degree` columns). No bounds checking is performed.
-- Column 1 is never modified; it serves as the base for all polynomial terms.
-- Columns 2 through `degree` are overwritten with powers 2 through `degree`.
-- For small datasets or low degrees, `par_cal=false` (sequential) is typically
-  faster due to threading overhead.
-
-# Example
-```julia
-# Preallocate a matrix with 3 columns for base values and polynomials up to degree 3
-poly_mat = zeros(100, 3)
-poly_mat[:, 1] .= rand(100)  # Fill first column with base values
-
-# Compute polynomial terms in-place
-polynomial_fnc_fast!(poly_mat, 3)
-# Now poly_mat[:, 2] contains squared values, poly_mat[:, 3] contains cubed values
-```
+- `par_cal::Bool=false`: Use `Threads.@threads` for parallel computation
 """
 function polynomial_fnc_fast!(poly_mat::Union{Array{<:Number}, SubArray{<:Number}}, degree::Int; par_cal::Bool = false)
     # Compute polynomial columns (each column of the matrix represents the i's polynomial of the first column)
@@ -400,58 +327,13 @@ end
 """
     fastOLS(; Y, X, multicolcheck=true, force=false) -> Vector{Float64}
 
-Compute Ordinary Least Squares (OLS) regression coefficients using optimized
-linear algebra operations. This function minimizes memory allocations and uses
-efficient in-place operations for computing β̂ = (X'X)⁻¹X'Y.
-
-The implementation uses Cholesky decomposition for solving the normal equations,
-which is faster than direct matrix inversion but may be less stable for
-ill-conditioned design matrices.
+Compute OLS coefficients β̂ = (X'X)⁻¹X'Y using in-place Cholesky decomposition for minimal allocations. Optionally checks and handles multicollinearity.
 
 # Keyword Arguments
-- `Y::Union{Matrix, Vector}`: The dependent variable(s). Can be a vector for
-  single-response regression or a matrix for multiple responses.
-- `X::Union{Matrix{<:Number}, Vector{<:Number}}`: The design matrix of regressors
-  (independent variables). Each column represents a regressor, each row an
-  observation. Can also be a vector for single-regressor case.
-- `multicolcheck::Bool=true`: If `true`, checks for perfect multicollinearity
-  in the regressors by comparing `rank(X)` to the number of columns. This helps
-  detect singular design matrices before attempting to solve the system.
-- `force::Bool=false`: If `true` and multicollinearity is detected, automatically
-  drops the first offending column and prints a warning. If `false`, throws an
-  error when multicollinearity is detected. Only relevant when `multicolcheck=true`.
-
-# Returns
-- `Vector{Float64}`: A vector of estimated regression coefficients with length
-  equal to the number of columns in `X` (or 1 if `X` is a vector). If `force=true`
-  and a column was dropped due to multicollinearity, the length reflects the
-  reduced design matrix.
-
-# Throws
-- Throws an error with message "ERROR: Regressors are perfectly multicolliniar"
-  if `multicolcheck=true`, `force=false`, and `rank(X) < ncol(X)`.
-
-# Performance Notes
-- Uses in-place operations (`mul!`, `ldiv!`, `cholesky!`) to minimize allocations.
-- Preallocates `cache` matrix for X'X and `coefs` vector for results.
-- Cholesky decomposition via `ldiv!(cholesky!(Hermitian(cache)), coefs)` is the
-  fastest approach for well-conditioned matrices (see Julia discourse #103111).
-- For ill-conditioned or numerically unstable problems, consider alternative
-  solvers (e.g., QR decomposition or regularized regression).
-
-# Example
-```julia
-# Simple linear regression
-X = [ones(100) randn(100)]  # Intercept + one regressor
-Y = 2.0 .+ 3.0 .* X[:, 2] .+ 0.1 .* randn(100)
-β = fastOLS(Y=Y, X=X)
-# β ≈ [2.0, 3.0]
-
-# Multiple regression with multicollinearity check
-X_bad = [ones(50) randn(50) ones(50)]  # First and third columns identical
-Y = randn(50)
-β = fastOLS(Y=Y, X=X_bad, force=true)  # Drops one column, prints warning
-```
+- `Y::Union{Matrix, Vector}`: Dependent variable(s)
+- `X::Union{Matrix{<:Number}, Vector{<:Number}}`: Design matrix of regressors
+- `multicolcheck::Bool=true`: Check for perfect multicollinearity
+- `force::Bool=false`: Auto-drop multicollinear columns with warning instead of error
 """
 function fastOLS(; Y::Union{Matrix, Vector}, X::Union{Matrix{<:Number}, Vector{<:Number}}, multicolcheck::Bool = true, force::Bool = false) # Y::Vector{<:Number}, X::Matrix{<:Number}
 
@@ -490,14 +372,22 @@ function fastOLS(; Y::Union{Matrix, Vector}, X::Union{Matrix{<:Number}, Vector{<
     return coefs
 end
 
-## Function drawing a sample of firms
-function draw_sample(data::DataFrame, id::Symbol)
+"""
+    draw_sample(; data, id, sample_size=length(unique(data[!, id])), with_replacement=true) -> DataFrame
 
-    id_list = unique(data[!, id])
+Draw bootstrap sample of firms from panel data. Assigns unique IDs to resampled firms to avoid duplicate ID issues in subsequent panel operations.
+
+# Keyword Arguments
+- `data::DataFrame`: Panel dataset to sample from
+- `id::Symbol`: Firm identifier column
+- `sample_size::Int`: Number of firms to sample (default: all unique firms)
+- `with_replacement::Bool=true`: Sample with or without replacement
+"""
+function draw_sample(;data::DataFrame, id::Symbol, sample_size::Int=length(unique(data[!, id])), with_replacement::Bool=true)
     
     ## Randomly chose observation
     # Generate vector with sample of IDs
-    boot_choose = DataFrame(id => sample(id_list, length(id_list); replace=true))
+    boot_choose = DataFrame(id => sample(unique(data[!, id]), sample_size, replace=with_replacement))
 
     # Add unique identifier
     boot_choose.unique_id = range(1,length = length(boot_choose[!, id]))
@@ -508,6 +398,11 @@ function draw_sample(data::DataFrame, id::Symbol)
     return sample_data
 end
 
+"""
+    tj_print_res_bigestimator(data::DataFrame, Results::Results, Setup::Setup)
+
+Print formatted estimation results table using `PrettyTables`. Displays production function and ω law-of-motion parameters with standard errors, t-statistics, p-values, and confidence intervals.
+"""
 function tj_print_res_bigestimator(data::DataFrame, Results::Results, Setup::Setup)
     
     # Production function parameters
@@ -554,8 +449,11 @@ const superscript_map = Dict(
     'v' => 'ᵛ', 'w' => 'ʷ', 'x' => 'ˣ', 'y' => 'ʸ', 'z' => 'ᶻ',
     '+' => '⁺', '-' => '⁻', '=' => '⁼', '(' => '⁽', ')' => '⁾'
 )
+
 """
-Function that returns the superscript of the corresponding input character (b/c Julia does not have a simple function for that)
+    superscript_this!(c::String) -> Char
+
+Convert first character of string to its Unicode superscript equivalent using `superscript_map`. Returns original character if no superscript exists.
 """
 function superscript_this!(c::String) # Need to use a string as input because I don't understand Chars in Julia. Char(5) returns a different unicode than string(5). And the superscript of Char(5) does not  work
     # Return the superscript character if it exists in the map, else return the original character

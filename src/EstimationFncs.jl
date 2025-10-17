@@ -1,40 +1,42 @@
 """
-    tj_prod_est(; data, output, flexible_input, fixed_inputs, flexible_input_price, output_price, ω_lom_degree=1, time, id, options=Dict())
+    tj_prod_est(; data, output, flexible_input, fixed_inputs, flexible_input_price, output_price, ω_lom_degree=1, ω_shifter=[], time, id, std_err_estimation=true, std_err_type="Bootstrap", boot_reps=200, maximum_boot_tries=10, optimizer_options=NamedTuple())
 
-Top-level estimation entry. This function orchestrates setup and result
-initialization for the production function estimation and returns a tuple
-`(results, setup)` where `results` is a `Results` object and `setup` is a
-`Setup` object containing the inputs and options.
+Top-level estimation entry point for production function estimation using the
+approach described in Trunschke and Judd (2024). Returns a tuple `(Results, Setup)` with parameter
+estimates and configuration.
 
-# Keyword arguments
-- `data::DataFrame`: input dataset
-- `output::Symbol`: dependent variable column name
-- `flexible_input::Vector{Symbol}`: names of flexible input variables
-- `fixed_inputs::Vector{Symbol}`: names of fixed input variables
-- `flexible_input_price::Symbol`: price variable for the flexible input
-- `output_price::Symbol`: price variable for the output
-- `ω_lom_degree::Int=1`: degree for the ω series terms (default: 1)
-- `time::Symbol`: time variable column name
-- `id::Symbol`: firm identifier column name
-- `options::Dict{Symbol,Any}=Dict()`: additional options passed to the estimator
+# Keyword Arguments
+- `data::DataFrame`: Input dataset with (firm-time) panel structure
+- `output::Symbol`: Output variable column name
+- `flexible_input::Symbol`: Flexible input variable (e.g., materials)
+- `fixed_inputs::Union{Symbol,Vector{Symbol}}`: Fixed input variable(s) (e.g., capital, labor)
+- `flexible_input_price::Symbol`: Price of flexible input
+- `output_price::Symbol`: Output price
+- `ω_lom_degree::Int=1`: Polynomial degree for productivity law-of-motion
+- `ω_shifter::Union{Symbol,Vector{Symbol}}=[]`: Optional productivity shifter variables
+- `time::Symbol`: Time period identifier
+- `id::Symbol`: Firm/unit identifier
+- `std_err_estimation::Bool=true`: Whether to compute standard errors
+- `std_err_type::String="Bootstrap"`: Type of standard errors ("Bootstrap" only currently)
+- `boot_reps::Int=200`: Number of bootstrap replications
+- `maximum_boot_tries::Int=10`: Max retry attempts per failed bootstrap iteration
+- `optimizer_options::NamedTuple=NamedTuple()`: Optimization settings (see Optim.jl)
 
 # Returns
-- `(results::Results, setup::Setup)`
+- `NamedTuple`: `(Results, Setup)` containing estimates and configuration
 
-# Examples
+# Example
 ```julia
-using DataFrames
-df = DataFrame(Y = rand(100), K = rand(100), L = rand(100), M = rand(100))
-results, setup = tj_prod_est(data = df,
-                            output = :Y,
-                            flexible_input = [:M],
-                            fixed_inputs = [:K, :L],
-                            flexible_input_price = :Pᴹ,
-                            output_price = :Pʸ,
-                            ω_lom_degree = 1,
-                            time = :year,
-                            id = :firm,
-                            options = Dict())
+results = tj_prod_est(
+    data = df,
+    output = :Y,
+    flexible_input = :M,
+    fixed_inputs = [:K, :L],
+    flexible_input_price = :Pᴹ,
+    output_price = :Pʸ,
+    time = :year,
+    id = :firm_id,
+)
 ```
 """
 function tj_prod_est(;data::DataFrame, 
@@ -126,7 +128,38 @@ function tj_prodest_estimation!(data::DataFrame, Setup::Setup, Results::Results)
     end
 end
 
+"""
+    tj_onestep_estimator(data, Setup, Results) -> NamedTuple
 
+Perform one-step GMM estimation of production function parameters.
+
+# Arguments
+- `data::DataFrame`: Prepared estimation dataset containing output, inputs,
+  prices, and lagged variables. Should be the output of `jt_data_prep`.
+- `Setup::Setup`: Configuration struct containing model specification (variable
+  names, polynomial degree, optimizer settings, etc.).
+- `Results::Results`: Results struct that will store the criterion value and
+  is used to determine the structure of output estimates.
+
+# Returns
+- `NamedTuple`: A nested NamedTuple with two fields:
+  - `prd_fnc`: Production function parameters as a NamedTuple with keys like
+    `:constant`, `:K`, `:L`, `:M` (depends on `Setup.all_inputs`)
+  - `ω_lom`: Productivity law-of-motion parameters as a NamedTuple with keys
+    like `:ω`, `:ω²`, etc. (depends on `Setup.ω_lom_degree` and `Setup.ω_shifter`)
+
+# Optimization Details
+The optimization uses `Optim.jl`'s numerical optimization routines and allows to set
+all optimizer options with `Optim.Options(...)`. One can set Box constraints
+providing the `lower_bound` and `upper_bound` arguments in `TJProdEst.tj_prod_est` combined
+with a `Optim.Fminbox` optimizer.
+
+# Throws
+- Throws an error with message "Estimation did not converge..." if the
+  optimizer fails to converge.
+- Throws an error for unsupported production function forms (currently only
+  "CobbDouglas" is supported).
+"""
 function tj_onestep_estimator(data::DataFrame, Setup::Setup, Results::Results)
 
     # Define weights as an identity matrix. Weighting does not matter (exactly identified)
@@ -149,7 +182,6 @@ function tj_onestep_estimator(data::DataFrame, Setup::Setup, Results::Results)
     end
 
     # Optimize
-    display(tj_prodest_criterion(data = data, Setup = Setup, β = Setup.optimizer_options.startvals, weight = weights, c = c))
     opt = if typeof(Setup.optimizer_options.optimizer) <: Fminbox
         optimize(par -> tj_prodest_criterion(data = data, Setup = Setup, β = par, weight = weights, c = c),
                                              Setup.optimizer_options.lower_bound, Setup.optimizer_options.upper_bound,
@@ -160,9 +192,7 @@ function tj_onestep_estimator(data::DataFrame, Setup::Setup, Results::Results)
                                              Setup.optimizer_options.startvals, Setup.optimizer_options.optimizer,
                                              Setup.optimizer_options.optim_options)
     end
-    if Results.criterion_value == Inf
-        display(opt)
-    end
+    
     # Throw an error message if GMM did not converge
     if !Optim.converged(opt)
         throw("Estimation did not converge. Check data and numerical optimizer options.")
@@ -200,9 +230,8 @@ and residuals).
   transformed columns.
 - `Setup::Setup`: configuration struct containing model specification (inputs,
   variables, degree of ω polynomial, etc.).
-- `β::Vector{<:Number}`: candidate parameter vector. The first element is the
-  flexible input coefficient (βᴹ) and the remaining are fixed input
-  coefficients.
+- `β::Vector{<:Number}`: candidate parameter vector ordered as 
+  [constant, fixed_input_coeffs..., flexible_input_coeff].
 - `weight::Union{Array,UniformScaling}`: weighting matrix for the moment
   conditions. Often set to identity matrix `I` for exactly identified models.
 - `c::NamedTuple`: preallocated cache containing arrays for intermediate
@@ -240,68 +269,25 @@ end
 """
     tj_prod_reg!(data, Setup, β, c) -> Nothing
 
-In-place computation of productivity (ω) terms and the law-of-motion (LOM) 
-regression for the production function estimation. This function implements 
-the core calculations for the proxy variable approach, computing current and 
-lagged productivity, estimating the productivity LOM via OLS, and calculating 
-the structural error (ξ).
-
-This is a mutating function (hence the `!`) that updates the preallocated 
-arrays in the `c` cache NamedTuple in-place for efficiency.
+Compute productivity (ω) and its law-of-motion via in-place OLS regression.
+Mutates the cache `c` with productivity terms, LOM parameters, and structural
+errors.
 
 # Arguments
-- `data::DataFrame`: The estimation dataset containing output, inputs, prices, 
-  and lagged variables. Must include columns for current and lagged values of 
-  all production function variables.
-- `Setup::Setup`: The setup struct containing configuration parameters including 
-  variable names, polynomial degree, and production function form.
-- `β::Union{Vector{<:Number}, SubArray{...}}`: Production function parameters 
-  vector. The ordering is: [constant, fixed_input_coeffs..., flexible_input_coeff].
-  For Cobb-Douglas: β = [α₀, αₖ₁, αₖ₂, ..., αₘ] where K's are fixed inputs and 
-  M is the flexible input.
-- `c::NamedTuple`: Cache NamedTuple containing preallocated arrays for intermediate 
-  calculations. Must include fields: `ω_array`, `ω_lom_array`, `ρ_hat`, `ξ_hat`. 
-  These arrays are mutated in-place.
+- `data::DataFrame`: Estimation dataset with output, inputs, and lagged variables
+- `Setup::Setup`: Configuration (variable names, polynomial degree)
+- `β::Vector{<:Number}`: Production function parameters [constant, fixed_inputs..., flexible_input]
+- `c::NamedTuple`: Preallocated cache to mutate
 
 # Returns
-- Nothing (the function mutates `c` in-place)
+- `Nothing`: The function mutates the cache `c` in-place.
 
-# Side Effects (Mutations)
-The function updates the following fields in `c`:
-- `c.ω_array`: Filled with current productivity (ω) computed from the production 
-  function residual after accounting for inputs and the proxy variable.
-- `c.ω_lom_array`: First column filled with lagged productivity (lag_ω), then 
-  polynomial terms computed via `polynomial_fnc_fast!`, and ω-shifter columns 
-  (if present) that were preallocated during setup.
-- `c.ρ_hat`: Filled with OLS coefficients from regressing ω on its lagged 
-  polynomial terms and ω-shifters (the LOM parameters).
-- `c.ξ_hat`: Filled with structural error (innovation to productivity), computed 
-  as ξ = ω - LOM(lag_ω, ω_shifters).
-
-# Implementation Details
-The productivity term ω is recovered from the production function by solving:
-```
-ω = ln(Y) + ln(Pᴹ·M / Pʸ·Y) - ln(M) - β₀ - βₘ - ∑βₖ·ln(K) - (βₘ - 1)·ln(M)
-```
-where the proxy variable relationship is used to invert for productivity.
-
-The law-of-motion is estimated via OLS:
-```
-ω = ρ₀ + ρ₁·lag_ω + ρ₂·lag_ω² + ... + ρₚ·lag_ωᵖ + ρ_shifters·shifters + ξ
-```
-
-# Example
-```julia
-# Called internally during GMM criterion evaluation
-tj_prod_reg!(est_data, Setup, β_current, cache)
-# cache.ξ_hat now contains the structural errors
-# cache.ρ_hat contains the LOM parameters
-```
-
-# See Also
-- `tj_prodest_criterion`: Uses this function to compute moment conditions
-- `polynomial_fnc_fast!`: Computes polynomial terms for the LOM
-- `fastOLS`: Estimates the LOM coefficients
+# Side Effects
+Updates `c` fields:
+- `ω_array`: Current productivity
+- `ω_lom_array`: Lagged productivity and polynomial terms
+- `ρ_hat`: LOM coefficients (from OLS of ω on lag_ω polynomials + shifters)
+- `ξ_hat`: Productivity innovations (ω - predicted LOM)
 """
 function tj_prod_reg!(data::DataFrame, Setup::Setup,
                        β::Union{Vector{<:Number},SubArray{Float64, 1, Vector{Float64}, Tuple{UnitRange{Int64}}, true}},
@@ -327,7 +313,30 @@ function tj_prod_reg!(data::DataFrame, Setup::Setup,
     c.ξ_hat .= c.ω_array .- c.ω_lom_array * c.ρ_hat
 end
 
-## Function calculating some SE related statistics
+"""
+    tj_std_error_stats(data, Setup, Results) -> Nothing
+
+Compute standard errors, t-statistics, p-values, and confidence intervals via
+bootstrap resampling. Mutates the `Results` struct in-place with statistical
+inference results.
+
+# Arguments
+- `data::DataFrame`: Estimation dataset
+- `Setup::Setup`: Configuration including bootstrap settings (`boot_reps`, `std_err_type`)
+- `Results::Results`: Results struct to update with inference statistics
+
+# Side Effects
+Populates the following fields in `Results`:
+- `variance`: Bootstrap variance estimates
+- `std_errors`: Standard errors (√variance)
+- `t_statistics`: t-statistics for hypothesis testing
+- `p_values`: Two-sided p-values (assuming normality)
+- `conf_intervals`: 95% confidence intervals (±1.96 × SE)
+
+# Notes
+- Currently only supports bootstrap standard errors
+- Uses `bootstrap_tj_prodest` to generate bootstrap samples
+"""
 function tj_std_error_stats(data::DataFrame, Setup::Setup, Results::Results)
 
     if Setup.std_err_type == "Bootstrap"
@@ -375,9 +384,31 @@ function tj_std_error_stats(data::DataFrame, Setup::Setup, Results::Results)
             ω_lom = (; Pair.(keys(Results.point_estimates.ω_lom), eachrow(conf_int_vec[length(Results.point_estimates.prd_fnc)+1:end,:]))...),
         )
     
+    
 end
 
-## Bootstrap function
+"""
+    bootstrap_tj_prodest(data, Setup, Results) -> Matrix{Float64}
+
+Generate bootstrap estimates by resampling firms and re-estimating the model.
+Returns a matrix where each row contains parameter estimates from one bootstrap
+replication.
+
+# Arguments
+- `data::DataFrame`: Estimation dataset
+- `Setup::Setup`: Configuration with `boot_reps` and `maximum_boot_tries`
+- `Results::Results`: Results struct (used for parameter structure)
+
+# Returns
+- `Matrix{Float64}`: Bootstrap estimates matrix of size 
+  `(boot_reps × n_params)` where n_params = production function params + 
+  ω LOM params. Each row is one bootstrap replication.
+
+# Details
+- Uses panel bootstrap: samples firms with replacement, keeps entire time series
+- Parallelized across bootstrap repetitions using `Threads.@threads`
+- Retries failed estimations up to `maximum_boot_tries` times per replication
+"""
 function bootstrap_tj_prodest(data::DataFrame, Setup::Setup, Results::Results)
     
     # Set some counters
@@ -394,7 +425,7 @@ function bootstrap_tj_prodest(data::DataFrame, Setup::Setup, Results::Results)
         successfull_rep = false # Define exit flag
 
         while successfull_rep == false
-            boot_data = draw_sample(data, Setup.id) # Draw bootstrap sample
+            boot_data = draw_sample(data=data, id=Setup.id, with_replacement=true) # Draw bootstrap sample
             
             # Estimate model parameters with bootstrap sample
             try
