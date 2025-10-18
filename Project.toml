@@ -1,7 +1,7 @@
 name = "TJProdEst"
 uuid = "abc1b9c5-3c15-4812-bf1e-3dec67f530a4"
 authors = ["Markus Trunschke <markus.trunschke@googlemail.com>"]
-version = "0.0.1"
+version = "0.0.2"
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
