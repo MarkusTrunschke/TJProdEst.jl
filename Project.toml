@@ -1,7 +1,7 @@
 name = "TJProdEst"
 uuid = "abc1b9c5-3c15-4812-bf1e-3dec67f530a4"
-authors = ["Markus Trunschke <markus.trunschke@googlemail.com>"]
 version = "0.0.3"
+authors = ["Markus Trunschke <markus.trunschke@googlemail.com>"]
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
@@ -27,6 +27,7 @@ Optim = "1"
 PrettyTables = "2, 3"
 ProgressMeter = "1"
 ShiftedArrays = "2"
+Statistics = "1"
 julia = "1.10"
 
 [extras]
